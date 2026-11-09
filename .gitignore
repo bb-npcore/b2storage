@@ -1,0 +1,10 @@
+/target
+*.exe
+*.dll
+*.zip
+*.log
+*.bak
+
+# Unreferenced leftover: not in Cargo.toml or Cargo.lock, and wgpu is not used
+# anywhere (the app renders through glow). Safe to delete from disk.
+egui-wgpu-patched/
