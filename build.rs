@@ -48,16 +48,19 @@ fn embed_mesa() {
                 "pub const MESA_VERSION: &str = {:?};\npub const MESA_ARCH: &str = {:?};\n",
                 payload.version, payload.arch
             ));
-            out.push_str("pub static MESA_FILES: &[(&str, &[u8], u64)] = &[\n");
+            out.push_str("pub static MESA_FILES: &[(&str, &[u8], u64, &str)] = &[\n");
             for entry in &payload.files {
                 let packed = payload.dir.join(format!("{}.xz", entry.name));
                 if !packed.is_file() {
                     panic!("vendored Mesa payload {} is missing", packed.display());
                 }
                 println!("cargo:rerun-if-changed={}", packed.display());
+                // Fails the build on a corrupted or swapped payload, so a bad DLL can
+                // never be embedded into a release binary.
+                verify_payload(&packed, entry);
                 out.push_str(&format!(
-                    "    ({:?}, include_bytes!({:?}), {}),\n",
-                    entry.name, packed, entry.raw_len
+                    "    ({:?}, include_bytes!({:?}), {}, {:?}),\n",
+                    entry.name, packed, entry.raw_len, entry.sha256
                 ));
             }
             out.push_str("];\n");
@@ -78,7 +81,7 @@ fn embed_mesa() {
             }
             out.push_str("pub const MESA_VERSION: &str = \"none\";\n");
             out.push_str("pub const MESA_ARCH: &str = \"none\";\n");
-            out.push_str("pub static MESA_FILES: &[(&str, &[u8], u64)] = &[];\n");
+            out.push_str("pub static MESA_FILES: &[(&str, &[u8], u64, &str)] = &[];\n");
         }
     }
 
@@ -89,6 +92,37 @@ fn embed_mesa() {
 struct Entry {
     name: String,
     raw_len: u64,
+    sha256: String,
+}
+
+/// Decompresses `packed` and checks it against the length and SHA-256 recorded in
+/// manifest.txt. The manifest hashes the decompressed DLL, which is what gets loaded.
+fn verify_payload(packed: &Path, entry: &Entry) {
+    use sha2::{Digest, Sha256};
+
+    let compressed = std::fs::read(packed)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", packed.display()));
+    let mut raw = Vec::with_capacity(entry.raw_len as usize);
+    lzma_rs::xz_decompress(&mut std::io::Cursor::new(compressed), &mut raw)
+        .unwrap_or_else(|e| panic!("{} is not a valid xz file: {e}", packed.display()));
+
+    if raw.len() as u64 != entry.raw_len {
+        panic!(
+            "{}: decompressed to {} bytes, manifest says {}",
+            entry.name,
+            raw.len(),
+            entry.raw_len
+        );
+    }
+
+    let actual: String = Sha256::digest(&raw).iter().map(|b| format!("{b:02x}")).collect();
+    if !actual.eq_ignore_ascii_case(&entry.sha256) {
+        panic!(
+            "{}: SHA-256 mismatch\n  manifest: {}\n  payload:  {}\nRe-vendor with scripts/fetch-mesa.py, \
+             or investigate why the payload changed.",
+            entry.name, entry.sha256, actual
+        );
+    }
 }
 
 struct Payload {
@@ -101,7 +135,7 @@ struct Payload {
 /// manifest.txt format:
 ///   version 26.2.0
 ///   arch x64
-///   <file name> <uncompressed byte length> <sha256>
+///   <file name> <uncompressed byte length> <sha256 of the uncompressed file>
 fn read_manifest(dir: &Path) -> Option<Payload> {
     let text = std::fs::read_to_string(dir.join("manifest.txt")).ok()?;
     let mut version = String::new();
@@ -120,9 +154,11 @@ fn read_manifest(dir: &Path) -> Option<Payload> {
             "arch" => arch = parts.next()?.to_string(),
             name => {
                 let raw_len: u64 = parts.next()?.parse().ok()?;
+                let sha256 = parts.next()?.to_string();
                 files.push(Entry {
                     name: name.to_string(),
                     raw_len,
+                    sha256,
                 });
             }
         }

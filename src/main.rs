@@ -3,6 +3,7 @@
 mod cache;
 mod client;
 mod config;
+mod secure;
 
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
@@ -1294,7 +1295,7 @@ impl App {
                 ui.label(
                     egui::RichText::new(
                         "Create a key in the Backblaze console under Account › Application Keys.\n\
-                         Keys are saved to ~/.b2storage/config.json on this machine only.",
+                         Keys are stored encrypted on this machine, readable only by your Windows account.",
                     )
                     .size(11.0)
                     .color(egui::Color32::GRAY),
@@ -2978,9 +2979,25 @@ fn mesa_cache_dir() -> PathBuf {
     ))
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// True when `path` already holds exactly the expected bytes. Size is checked first
+/// because it is free and rules out nearly every stale or partial file.
+fn file_matches(path: &std::path::Path, len: u64, sha256: &str) -> bool {
+    if std::fs::metadata(path).map(|m| m.len()).ok() != Some(len) {
+        return false;
+    }
+    std::fs::read(path)
+        .map(|bytes| sha256_hex(&bytes).eq_ignore_ascii_case(sha256))
+        .unwrap_or(false)
+}
+
 /// Unpack the embedded Mesa DLLs into the cache directory, skipping any file
-/// that is already there at the right size. Returns the directory holding a
-/// usable `opengl32.dll`.
+/// that is already there with the expected content. Returns the directory holding
+/// a usable `opengl32.dll`.
 fn unpack_bundled_mesa() -> Option<PathBuf> {
     if mesa_payload::MESA_FILES.is_empty() {
         return None;
@@ -2996,11 +3013,13 @@ fn unpack_bundled_mesa() -> Option<PathBuf> {
         return None;
     }
 
-    for (name, packed, raw_len) in mesa_payload::MESA_FILES {
+    for (name, packed, raw_len, sha256) in mesa_payload::MESA_FILES {
         let dest = dir.join(name);
 
-        // Already unpacked by an earlier run or another instance.
-        if std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(*raw_len) {
+        // Already unpacked by an earlier run or another instance. Matching on size alone
+        // would load any same-sized DLL planted in this per-user folder, so compare the
+        // content hash recorded at build time.
+        if file_matches(&dest, *raw_len, sha256) {
             continue;
         }
 
@@ -3020,6 +3039,10 @@ fn unpack_bundled_mesa() -> Option<PathBuf> {
             ));
             return None;
         }
+        if !sha256_hex(&decoded).eq_ignore_ascii_case(sha256) {
+            log_crash(&format!("Bundled {} failed its SHA-256 check", name));
+            return None;
+        }
 
         // Write to a private temp name first so a half-written DLL is never
         // visible to a second instance starting at the same time.
@@ -3032,8 +3055,8 @@ fn unpack_bundled_mesa() -> Option<PathBuf> {
         if let Err(e) = std::fs::rename(&tmp, &dest) {
             let _ = std::fs::remove_file(&tmp);
             // Another instance may have won the race and the file is now in
-            // use. That is fine as long as the result is the right size.
-            if std::fs::metadata(&dest).map(|m| m.len()).ok() != Some(*raw_len) {
+            // use. That is fine as long as the result is the right file.
+            if !file_matches(&dest, *raw_len, sha256) {
                 log_crash(&format!("Failed to place {}: {}", dest.display(), e));
                 return None;
             }

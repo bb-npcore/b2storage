@@ -12,7 +12,8 @@ VPS or an RDP session) through Mesa's llvmpipe software renderer.
   chosen because it does not require the Visual C++ redistributable)
 - Re-vendor with: `python scripts/fetch-mesa.py`
 - SHA-256 checksums for each file are recorded in the per-architecture
-  `manifest.txt` and verified at build time.
+  `manifest.txt`. `build.rs` verifies them at build time and the app verifies
+  them again before loading the DLL.
 
 ### License
 

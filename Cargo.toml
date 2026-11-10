@@ -20,6 +20,7 @@ serde_json = "1"
 
 # Crypto
 sha1 = "0.10"
+sha2 = "0.10"
 base64 = "0.22"
 
 # Utils
@@ -30,6 +31,23 @@ bytesize = "1"
 lzma-rs = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = "0.4"
+
+# Credential files are encrypted with Windows DPAPI, so they are only readable by
+# the Windows user that saved them.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+# build.rs decompresses and hashes the vendored Mesa payload.
+[build-dependencies]
+sha2 = "0.10"
+lzma-rs = "0.3"
+
+# Build scripts default to opt-level 0, which makes hashing ~76 MB take far too long.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

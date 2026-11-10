@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # --locked fails the build if Cargo.lock would change, so CI builds exactly
+      # the dependency versions that are committed.
+      - name: Test
+        run: cargo test --locked
+
+      # build.rs verifies the vendored Mesa payload against manifest.txt, so a
+      # corrupted or swapped payload fails here rather than shipping.
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd target/release
+          cp b2storage.exe "b2storage-${GITHUB_REF_NAME//\//-}-x64.exe"
+          sha256sum "b2storage-${GITHUB_REF_NAME//\//-}-x64.exe" | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b2storage-windows-x64
+          path: |
+            target/release/b2storage-*-x64.exe
+            target/release/SHA256SUMS.txt
+
+  release:
+    # Runs only for version tags, and only after the tests passed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: b2storage-windows-x64
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" b2storage-*-x64.exe SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
